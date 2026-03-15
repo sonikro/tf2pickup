@@ -8,24 +8,36 @@ import { update } from '../update'
 import { minutesToMilliseconds } from 'date-fns'
 import { configuration } from '../../configuration'
 
+const SUPERSEDED_ABORT_REASON = 'superseded'
+const INTERRUPTED_ABORT_REASON = 'game-interrupted'
+
 export default fp(
   // eslint-disable-next-line @typescript-eslint/require-await
   async () => {
     const configurators = new Map<GameNumber, AbortController>()
 
     async function configureExclusive(game: GameModel) {
+      let controller: AbortController | undefined
+      let timeout: AbortSignal | undefined
       try {
-        configurators.get(game.number)?.abort()
-        const controller = new AbortController()
+        configurators.get(game.number)?.abort(SUPERSEDED_ABORT_REASON)
+        controller = new AbortController()
         const timeoutMs = game.gameServer?.pendingTaskId
           ? (await configuration.get('tf2_quick_server.timeout')) + minutesToMilliseconds(1)
           : minutesToMilliseconds(1)
-        const timeout = AbortSignal.timeout(timeoutMs)
+        timeout = AbortSignal.timeout(timeoutMs)
         const signal = AbortSignal.any([controller.signal, timeout])
-        const configurator = configure(game, { signal })
         configurators.set(game.number, controller)
-        await configurator
+        await configure(game, { signal })
       } catch (error) {
+        if (controller && timeout && isExpectedAbort(controller, timeout)) {
+          logger.warn(
+            { gameNumber: game.number, reason: String(controller.signal.reason) },
+            `configure cancelled for game #${game.number}`,
+          )
+          return
+        }
+
         logger.error({ error }, `error configuring game #${game.number}`)
         events.emit('game:gameServerConfigureFailed', { game, error })
         try {
@@ -45,7 +57,9 @@ export default fp(
           )
         }
       } finally {
-        configurators.delete(game.number)
+        if (controller && configurators.get(game.number) === controller) {
+          configurators.delete(game.number)
+        }
       }
     }
 
@@ -60,7 +74,7 @@ export default fp(
     // eslint-disable-next-line @typescript-eslint/require-await
     events.on('game:ended', async ({ game }) => {
       if (game.state === GameState.interrupted) {
-        configurators.get(game.number)?.abort()
+        configurators.get(game.number)?.abort(INTERRUPTED_ABORT_REASON)
       }
     })
   },
@@ -69,3 +83,7 @@ export default fp(
     encapsulate: true,
   },
 )
+
+function isExpectedAbort(controller: AbortController, timeout: AbortSignal): boolean {
+  return controller.signal.aborted && !timeout.aborted
+}
