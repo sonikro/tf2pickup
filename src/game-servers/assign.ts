@@ -13,9 +13,20 @@ const mutex = new Mutex()
 
 export async function assign(game: GameModel, selected?: string) {
   await mutex.runExclusive(async () => {
-    const gameServer = selected ? await assignSelected(game, selected) : await assignFirstFree(game)
+    const latest = await games.findOne({ number: game.number })
+    if (!selected && latest.gameServer) {
+      logger.info(
+        { gameNumber: latest.number, gameServerId: latest.gameServer.id },
+        'skipping auto assignment: game server already assigned',
+      )
+      return
+    }
 
-    game = await games.update(game.number, {
+    const gameServer = selected
+      ? await assignSelected(latest, selected)
+      : await assignFirstFree(latest)
+
+    game = await games.update(latest.number, {
       $set: {
         gameServer,
       },
